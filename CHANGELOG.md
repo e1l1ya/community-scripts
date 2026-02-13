@@ -9,7 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Variant script 'AddUrlParams.js'
 - Extender script 'ScanMonitor.js'
 - Active script 'OpenModelContextProtocolServer.js' - Attempts to detect Model Context Protocol (MCP) servers lacking authentication.
-- Active script to detect and exploit Web Cache Deception
+- Active script 'WebCacheDeception.js' - Detects and exploits Web Cache Deception vulnerabilities.
 
 ### Changed
 - Update minimum ZAP version to 2.16.0 and compile with Java 17.

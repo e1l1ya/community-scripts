@@ -1,130 +1,111 @@
-// Note that new active scripts will initially be disabled
-// Right click the script in the Scripts tree and select "enable"  
-
+// Description: Detects and exploits Web Cache Deception vulnerabilities.
+// Author: Eiliya Keshtkar (@e1l1ya)
+// Version: 1.0
 const ScanRuleMetadata = Java.type("org.zaproxy.addon.commonlib.scanrules.ScanRuleMetadata");
 const Filename = 'customzap';
+const DotSegment = "..%2f";
 
-const Delimiters = [
-    "/",
-    ";",
-    ".",
-    "?",
-    "&",
-    "=",
-    "#",
-    "+",
-    ",",
-    "|"
+/** Delimiter/extension/path lists (populate according to threshold/strength) */
+let Delimiters = [];
+let Extensions = [];
+let Folders = [];
+
+// Most commonly working in real WCD cases
+const DELIM_LOW = [
+    "/",   // path confusion
+    ";",   // matrix param (Apache/IIS quirks)
+    ".",   // fake extension trigger
+    "%2F"  // encoded slash bypass
 ];
 
-// File extensions that CDNs cache
-const Extensions = [
-    // Images
-    "jpg", "jpeg", "png", "gif", "svg", "webp", "bmp", "ico",
-    "tiff", "tif", "psd", "ai", "eps",
 
-    // Styles
-    "css", "scss", "sass", "less", "styl",
-
-    // JavaScript
-    "js", "jsx", "ts", "tsx", "coffee", "min.js",
-
-    // Fonts
-    "woff", "woff2", "ttf", "otf", "eot",
-
-    // Media
-    "mp4", "webm", "ogg", "mov", "avi", "wmv",
-    "mp3", "wav", "ogg", "m4a", "flac",
-
-    // Documents
-    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
-    "txt", "rtf", "csv", "xml", "json",
-
-    // Archives
-    "zip", "tar", "gz", "rar", "7z", "iso",
-
-    // Web files
-    "html", "htm", "xhtml", "swf", "flv"
+// Frequently useful but less universal
+const DELIM_MEDIUM = [
+    "%2E", "%2e",   // encoded dot normalization issues
+    "%3B",          // encoded semicolon
+    "%2f",          // lowercase encoded slash
+    "%5C", "\\",    // backslash (IIS / Windows)
+    "%2E%2E",       // dot normalization
+    "%3F"           // encoded question mark (path confusion cases)
 ];
 
-const Folders = [
-    "static",
-    "assets",
-    "public",
-    "media",
-    "uploads",
-    "images",
-    "img",
-    "icons",
-    "logo",
-    "banners",
-    "backgrounds",
-    "js",
-    "javascript",
-    "scripts",
-    "css",
-    "styles",
-    "fonts",
-    "webfonts",
-    "typefaces",
-    "video",
-    "videos",
-    "mp4",
-    "audio",
-    "music",
-    "podcast",
-    "stream",
-    "downloads",
-    "documents",
-    "pdf",
-    "docs",
-    "attachments",
-    "resources",
-    "files",
-    "themes",
-    "templates",
-    "layouts",
-    "skins",
-    "design",
-    "lib",
-    "libs",
-    "library",
-    "libraries",
-    "vendor",
-    "node_modules",
-    "bower_components",
-    "dist",
-    "build",
-    "min",
-    "wp-content/uploads",
-    "wp-content/themes",
-    "wp-content/plugins",
-    "wp-includes/js",
-    "wp-includes/css",
-    "sites/default/files",
-    "cache",
-    "public/css",
-    "public/js",
-    "public/images",
-    "storage/app/public",
-    "app/assets",
-    "vendor/assets",
+
+// Rare but sometimes effective in proxy/CDN edge behavior
+const DELIM_HIGH = [
+    "#", "%23",
+    "?", "%3F",
+    "&", "%26",
+    "=", "%3D",
+    "+", "%2B",
+    ",", "%2C",
+    "%5F", "_",
+    "%7C", "|"
 ];
 
-var DotSegment = "..%2f";
+
+// Very rare, parser edge cases, usually noisy
+const DELIM_INSANE = [
+    "!", "%21",
+    "\"", "%22",
+    "$", "%24",
+    "%", "%25",
+    "'", "%27",
+    "(", "%28",
+    ")", "%29",
+    "*", "%2A",
+    ":", "%3A",
+    "<", "%3C",
+    ">", "%3E",
+    "@", "%40",
+    "[", "%5B",
+    "]", "%5D",
+    "^", "%5E",
+    "`", "%60",
+    "{", "%7B",
+    "}", "%7D",
+    "~", "%7E",
+    "-"
+];
+
+const EXT_LOW = ['css', 'js', 'min.js', 'png', 'jpg'];
+const EXT_MEDIUM = ['jpeg', 'gif', 'svg', 'webp', 'ico', 'woff', 'woff2', 'pdf', 'mp4', 'bmp', 'tiff'];
+const EXT_HIGH = ['tif', 'scss', 'sass', 'less', 'styl', 'jsx', 'xml', 'csv', 'html', 'htm'];
+const EXT_INSANE = ['xhtml', 'psd', 'ts', 'tsx', 'coffee', 'ttf', 'otf', 'eot', 'webm', 'mp3', 'wav', 'm4a', 'txt', 'json'];
+
+
+const FLD_LOW = [
+    'static', 'assets', 'public', 'media', 'uploads', 'images', 'img', 'css', 'js',
+];
+const FLD_MEDIUM = [
+    'fonts', 'video', 'videos', 'downloads', 'public/css', 'public/js', 'public/images',
+    'icons', 'backgrounds', 'banners',
+
+];
+const FLD_HIGH = [
+    'logo', 'javascript', 'scripts', 'styles', 'typefaces', 'audio',
+    'music', 'podcast', 'stream', 'documents', 'docs', 'pdf', 'attachments', 'files',
+    'themes', 'templates'
+];
+const FLD_INSANE = [
+    'layouts', 'skins', 'design', 'lib', 'libs', 'library', 'libraries', 'dist', 'build', 'min',
+    'node_modules', 'bower_components', 'vendor', 'vendor/assets', 'app/assets', 'storage/app/public',
+    'wp-content/uploads', 'wp-content/themes', 'wp-content/plugins', 'wp-includes/js', 'wp-includes/css', 'sites/default/files', 'cache', 'resources'
+];
 
 function getMetadata() {
     return ScanRuleMetadata.fromYaml(`
-id: 12345
+id: 100034
 name: Web Cache Deception Detection
-description: Detect Web Cache Deception in 2 way 1. add delimiters and file with extention, 2. bind attack with path traversal
-solution: Update the Web Cache policy to dont cache sensitive pages
+description: >
+  Detect Web Cache Deception in two ways: 1) add delimiters and a file with an extension, 2) combine the attack with path traversal.
+solution: >
+ Update the web cache policy to not cache sensitive pages.
 references:
   - https://portswigger.net/web-security/web-cache-deception
   - https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/07-Input_Validation_Testing/11.2-Testing_for_Web_Cache_Deception
 category: SERVER
 risk: MEDIUM
-confidence: LOW
+confidence: MEDIUM
 cweId: 524
 wascId: 13
 alertTags:
@@ -133,158 +114,220 @@ alertTags:
   WASC-13: Information Leakage
 status: alpha
 alertRefOverrides:
-  12345-1: {}
-  12345-2:
-    name: Active Vulnerability - Type XYZ
-    description: Detect Web Cache Deception
+  100034-1:
+    name: Web Cache Deception - Extension/Delimiter
+    description: Detects Web Cache Deception via delimiters and file extension fuzzing.
+  100034-2:
+    name: Web Cache Deception - Path Traversal
+    description: Detects Web Cache Deception via path traversal technique.
 `);
 }
 
-/**
- * Scans a "node", i.e. an individual entry in the Sites Tree.
- * The scanNode function will typically be called once for every page. 
- * 
- * @param as - the ActiveScan parent object that will do all the core interface tasks 
- *     (i.e.: sending and receiving messages, providing access to Strength and Threshold settings,
- *     raising alerts, etc.). This is an ActiveScriptHelper object.
- * @param msg - the HTTP Message being scanned. This is an HttpMessage object.
- */
-function scanNode(as, msg) {
-    var endWithSlash = false;
-    var isVulnerable = false;
-
-    // Skip cache deception testing for static files to reduce false positives and save resources
-    // Static files (images, CSS, JavaScript) are normally cached by design, not a vulnerability
-    // If Content-Type indicates static content, exit the function early
-    var contentType = msg.getResponseHeader().getHeader("Content-Type");
-    if (contentType !== null && (contentType.includes("image/") || contentType.includes("text/css") || contentType.includes("application/javascript"))) return;
-
-    // Get the original path from the request URI
-    var orgPath = msg.getRequestHeader().getURI().getPath();
-
-    // Handle null path - convert to empty string for consistent processing
-    if (orgPath === null) {
-        orgPath = ""
-    }
-
-    // Normalize the path by removing trailing slash (if present)
-    // Exceptions: Don't modify root path "/" and skip if path is already null
-    if (orgPath !== null && orgPath.endsWith("/")) {
-        endWithSlash = true;
-    }
-
-    isVulnerable = additionalFile2Cache(as, msg, orgPath, endWithSlash);
-
-    if (!isVulnerable) {
-        pathTraversal2Cache(as, msg, orgPath, endWithSlash);
-    }
-
-    // Path traversal to cache
-    return;
+function isStaticPath(path) {
+    if (!path) return false;
+    // List of static file extensions for detection
+    const staticExts = [
+        "css", "js", "gif", "jpg", "jpeg", "png", "svg", "ico", "webp",
+        "woff", "woff2", "ttf", "otf", "eot", "mp3", "wav", "m4a", "mp4",
+        "webm", "flv", "mov", "avi", "wmv", "pdf", "bmp", "tiff", "psd"
+    ];
+    // Get the extension (without query string or fragment)
+    let lastPart = path.split("?")[0].split("#")[0];
+    let dotSplit = lastPart.split(".");
+    if (dotSplit.length < 2) return false;
+    let ext = dotSplit[dotSplit.length - 1].toLowerCase();
+    return staticExts.includes(ext);
 }
 
+/** Fill Delimiters, Extensions, Folders based on attack threshold/strength */
+function configureScanInputs(as) {
+    Delimiters = [].concat(DELIM_LOW);
+    Extensions = [].concat(EXT_LOW);
+    Folders = [].concat(FLD_LOW);
+    let strength = as.getAttackStrength();
+
+    if (strength == "MEDIUM") {
+        Delimiters = Delimiters.concat(DELIM_MEDIUM);
+        Extensions = Extensions.concat(EXT_MEDIUM);
+        Folders = Folders.concat(FLD_MEDIUM);
+    }
+    if (strength == "HIGH") {
+        Delimiters = Delimiters.concat(DELIM_HIGH);
+        Extensions = Extensions.concat(EXT_HIGH);
+        Folders = Folders.concat(FLD_HIGH);
+    }
+    if (strength == "INSANE") {
+        Extensions = Extensions.concat(EXT_INSANE);
+        Folders = Folders.concat(FLD_INSANE);
+    }
+}
+
+// TODO: this section cant detect correctly
+function findEvidence(as, msg) {
+    let threshold = as.getAlertThreshold();
+    let xCache = msg.getResponseHeader().getHeader("X-Cache");
+
+    // LOW: Just check response has X-Cache header
+    if (threshold == "LOW") {
+        if (xCache !== null) {
+            return true;
+        }
+        return false;
+    }
+
+    else {
+        let repeatMsg = msg.cloneRequest();
+        as.sendAndReceive(repeatMsg, false, false);
+        let xCache2 = repeatMsg.getResponseHeader().getHeader("X-Cache");
+        // Look for "HIT" in either original or repeated response
+        if (xCache !== null && String(xCache).toUpperCase().indexOf("MISS") !== -1 && xCache2 !== null && String(xCache2).toUpperCase().indexOf("HIT") !== -1) {
+            return true;
+        }
+        return false;
+    }
+}
+
+function scanNode(as, msg) {
+    configureScanInputs(as);
+    let endWithSlash = false;
+    // Exit early for static files
+    let orgPath = msg.getRequestHeader().getURI().getPath();
+
+    if (orgPath !== null && isStaticPath(orgPath)) {
+        return;
+    }
+
+    if (orgPath === null) {
+        orgPath = "";
+    }
+    if (orgPath == "/") {
+        endWithSlash = true;
+    }
+    // Try extension/delimiter fuzz first; only proceed to path traversal if none found
+    let isVulnerable = additionalFile2Cache(as, msg, orgPath, endWithSlash);
+    if (!isVulnerable && as.getAttackStrength() == "HIGH" || as.getAttackStrength() == "INSANE") {
+        pathTraversal2Cache(as, msg, orgPath, endWithSlash);
+    }
+}
+
+function encodeIfNeeded(delim) {
+
+    // If already percent encoded, keep it
+    if (/^%[0-9A-Fa-f]{2}$/.test(delim)) {
+        return delim.toUpperCase();
+    }
+
+    // Characters safe for WCD path tricks (keep raw)
+    const SAFE_RAW = ["/", ".", ";"];
+
+    if (SAFE_RAW.indexOf(delim) !== -1) {
+        return delim;
+    }
+
+    // Everything else → percent encode
+    return encodeURIComponent(delim);
+}
+
+
 function additionalFile2Cache(as, msg, orgPath, endWithSlash) {
-
-    // Add additional file
     for (let i = 0; i < Delimiters.length; i++) {
-        var currentDelimiters = Delimiters[i];
-
+        let currentDelimiters = Delimiters[i];
         for (let j = 0; j < Extensions.length; j++) {
-            var newMsg = msg.cloneRequest();
-            var currentExtention = Extensions[j];
+            let currentExtension = Extensions[j];
+            let newMsg = msg.cloneRequest();
+            let payload, newPath;
+            let uri = newMsg.getRequestHeader().getURI();
 
-            if (endWithSlash && currentDelimiters == "/") {
-                var payload = Filename + "." + currentExtention;
+            let safeDelim = encodeIfNeeded(currentDelimiters);
+
+            if (endWithSlash && currentDelimiters === "/") {
+                payload = Filename + "." + currentExtension;
+            } else {
+                payload = safeDelim + Filename + "." + currentExtension;
             }
-            else {
-                var payload = currentDelimiters + "/" + Filename + "." + currentExtention;
-            }
+            newPath = orgPath + payload;
 
-            var newPath = orgPath + payload;
-
-            // Check if the scan was stopped before performing lengthy tasks
             if (as.isStop()) {
-                return
+                return false;
             }
 
-            newMsg.getRequestHeader().getURI().setPath(newPath);
+            uri.setPath(newPath);
 
-            // sendAndReceive(msg, followRedirect, handleAntiCSRFtoken)
             as.sendAndReceive(newMsg, false, false);
 
-            // Check has X Cache header
-            var hasXCache = newMsg.getResponseHeader().getHeader("X-Cache");
-            var statusCode = newMsg.getResponseHeader().getStatusCode();
-            if (hasXCache !== null && statusCode >= 200 && statusCode <= 300) {
+            // Cache validation: only count actual cache hits
+            let xCache = newMsg.getResponseHeader().getHeader("X-Cache");
+            let statusCode = newMsg.getResponseHeader().getStatusCode();
+            let evidence = findEvidence(as, newMsg);
 
-                raiseAlert(as, payload, newMsg, newPath)
-                return;
+            if (xCache !== null && statusCode >= 200 && statusCode < 300 && evidence) {
+                raiseAlert(as, "100034-1", payload, newMsg, newPath);
+                return true;
             }
         }
     }
-    return ;
-
+    return false;
 }
 
 function pathTraversal2Cache(as, msg, orgPath, endWithSlash) {
-    var pathDepth = orgPath.split('/').length - 1;
-    var parentDir = "";
-    var newPath = "";
-    var newMsg = msg.cloneRequest();
-
-    // Count Path Depth
-    for (var j = 0; j < pathDepth; j++) {
+    let pathDepth = orgPath.split('/').length - 1;
+    let parentDir = "";
+    for (let j = 0; j < pathDepth; j++) {
         parentDir += DotSegment;
     }
-
     for (let i = 0; i < Folders.length; i++) {
-        var currentFolder = Folders[i];
-
-        // Check if the scan was stopped before performing lengthy tasks
+        let currentFolder = Folders[i];
         if (as.isStop()) {
-            return
+            return;
         }
-
-        payload = "/" + currentFolder + "/" + parentDir;
-        newPath =  payload + orgPath;
+        let payload = "/" + currentFolder + "/" + parentDir;
+        let newPath = payload + orgPath;
+        let newMsg = msg.cloneRequest();
 
         newMsg.getRequestHeader().getURI().setEscapedPath(newPath);
 
         as.sendAndReceive(newMsg, false, false);
 
-        // Check has X Cache header
-        var hasXCache = newMsg.getResponseHeader().getHeader("X-Cache");
-        var statusCode = newMsg.getResponseHeader().getStatusCode();
-        if (hasXCache !== null && statusCode >= 200 && statusCode <= 300) {
-            raiseAlert(as, payload, newMsg, newPath)
+        let xCache = newMsg.getResponseHeader().getHeader("X-Cache");
+        let statusCode = newMsg.getResponseHeader().getStatusCode();
+        if (xCache !== null && statusCode >= 200 && statusCode < 300 && findEvidence(as, newMsg)) {
+            raiseAlert(as, "100034-2", payload, newMsg, newPath);
             return;
         }
     }
-    return ;
 }
 
-function raiseAlert(as, payload, newMsg, newPath) {
-    var requestUri = newMsg.getRequestHeader().getURI().toString();
+function raiseAlert(as, alertRef, payload, newMsg, newPath) {
+    let requestUri = newMsg.getRequestHeader().getURI().toString();
+    let name, description;
+    if (alertRef === "100034-1") {
+        name = "Web Cache Deception - Extension/Delimiter";
+        description = "The server appears to cache sensitive pages when accessed with file extensions or crafted delimiters. " +
+            "When requesting '" + newPath + "', this could allow attackers to cache sensitive user pages " +
+            "by appending file extensions or using delimiters, potentially exposing private data to other users.";
+    } else if (alertRef === "100034-2") {
+        name = "Web Cache Deception - Path Traversal";
+        description = "The server appears vulnerable to web cache deception via path traversal technique. " +
+            "When accessing '" + newPath + "', it may permit caching of sensitive resources due to improper path validation.";
+    } else {
+        name = "Web Cache Deception Vulnerability Detected";
+        description = "The server may be vulnerable to web cache deception attacks.";
+    }
 
-    as.newAlert("12345-1")
-        .setRisk(2)  // Medium
-        .setConfidence(2)  // Medium
-        .setName("Web Cache Deception Vulnerability Detected")
-        .setDescription(
-            "The server appears to cache sensitive pages when accessed with file extensions. " +
-            "When requesting '" + newPath + "'." +
-            "This could allow attackers to cache sensitive user pages by appending file extensions, " +
-            "potentially exposing private data to other users."
-        )
+    as.newAlert(alertRef)
+        .setRisk(2)       // Medium
+        .setConfidence(2) // Medium
+        .setName(name)
+        .setDescription(description)
         .setUri(requestUri)
         .setParam("Path")
         .setAttack(newPath)
         .setEvidence(payload)
         .setSolution(
-            "1. Configure the cache to not cache responses with cookies or session tokens\n" +
-            "2. Implement cache-control: private for authenticated pages\n" +
-            "3. Validate file extensions before allowing caching\n" +
-            "4. Use Vary: Cookie header appropriately"
+            "1. Configure the cache to not cache responses with cookies or session tokens.\n" +
+            "2. Implement cache-control: private for authenticated pages.\n" +
+            "3. Validate file extensions and paths before allowing caching.\n" +
+            "4. Use the Vary: Cookie header appropriately."
         )
         .setReference(
             "https://portswigger.net/web-security/web-cache-deception\n" +
@@ -296,28 +339,5 @@ function raiseAlert(as, payload, newMsg, newPath) {
         .raise();
 }
 
-/**
- * Scans a host.
- * The scanHost function will be called once per host being scanned.
- * @param as - the ActiveScan parent object that will do all the core interface tasks
- *     (i.e.: sending and receiving messages, providing access to Strength and Threshold settings,
- *     raising alerts, etc.). This is an ActiveScriptHelper object.
- * @param msg - the HTTP Message being scanned. This is an HttpMessage object.
- */
-function scanHost(as, msg) {
-}
-
-/**
- * Scans a specific parameter in an HTTP message.
- * The scan function will typically be called for every parameter in every URL and Form for every page.
- * 
- * @param as - the ActiveScan parent object that will do all the core interface tasks 
- *     (i.e.: sending and receiving messages, providing access to Strength and Threshold settings,
- *     raising alerts, etc.). This is an ActiveScriptHelper object.
- * @param msg - the HTTP Message being scanned. This is an HttpMessage object.
- * @param {string} param - the name of the parameter being manipulated for this test/scan.
- * @param {string} value - the original parameter value.
- */
-function scan(as, msg, param, value) {
-}
-
+function scanHost(as, msg) { }
+function scan(as, msg, param, value) { }
