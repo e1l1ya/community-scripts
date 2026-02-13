@@ -94,7 +94,7 @@ const FLD_INSANE = [
 
 function getMetadata() {
     return ScanRuleMetadata.fromYaml(`
-id: 100034
+id: 40039
 name: Web Cache Deception Detection
 description: >
   Detect Web Cache Deception in two ways: 1) add delimiters and a file with an extension, 2) combine the attack with path traversal.
@@ -114,10 +114,10 @@ alertTags:
   WASC-13: Information Leakage
 status: alpha
 alertRefOverrides:
-  100034-1:
+  40039-1:
     name: Web Cache Deception - Extension/Delimiter
     description: Detects Web Cache Deception via delimiters and file extension fuzzing.
-  100034-2:
+  40039-2:
     name: Web Cache Deception - Path Traversal
     description: Detects Web Cache Deception via path traversal technique.
 `);
@@ -261,7 +261,7 @@ function additionalFile2Cache(as, msg, orgPath, endWithSlash) {
             let evidence = findEvidence(as, newMsg);
 
             if (xCache !== null && statusCode >= 200 && statusCode < 300 && evidence) {
-                raiseAlert(as, "100034-1", payload, newMsg, newPath);
+                raiseAlert(as, "40039-1", payload, newMsg, newPath);
                 return true;
             }
         }
@@ -291,7 +291,7 @@ function pathTraversal2Cache(as, msg, orgPath, endWithSlash) {
         let xCache = newMsg.getResponseHeader().getHeader("X-Cache");
         let statusCode = newMsg.getResponseHeader().getStatusCode();
         if (xCache !== null && statusCode >= 200 && statusCode < 300 && findEvidence(as, newMsg)) {
-            raiseAlert(as, "100034-2", payload, newMsg, newPath);
+            raiseAlert(as, "40039-2", payload, newMsg, newPath);
             return;
         }
     }
@@ -300,12 +300,12 @@ function pathTraversal2Cache(as, msg, orgPath, endWithSlash) {
 function raiseAlert(as, alertRef, payload, newMsg, newPath) {
     let requestUri = newMsg.getRequestHeader().getURI().toString();
     let name, description;
-    if (alertRef === "100034-1") {
+    if (alertRef === "40039-1") {
         name = "Web Cache Deception - Extension/Delimiter";
         description = "The server appears to cache sensitive pages when accessed with file extensions or crafted delimiters. " +
             "When requesting '" + newPath + "', this could allow attackers to cache sensitive user pages " +
             "by appending file extensions or using delimiters, potentially exposing private data to other users.";
-    } else if (alertRef === "100034-2") {
+    } else if (alertRef === "40039-2") {
         name = "Web Cache Deception - Path Traversal";
         description = "The server appears vulnerable to web cache deception via path traversal technique. " +
             "When accessing '" + newPath + "', it may permit caching of sensitive resources due to improper path validation.";
