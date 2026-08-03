@@ -1,6 +1,6 @@
 // Description: Detects and exploits Web Cache Deception vulnerabilities.
 // Author: Eiliya Keshtkar (@e1l1ya)
-// Version: 1.0
+// Version: 1.1
 const ScanRuleMetadata = Java.type("org.zaproxy.addon.commonlib.scanrules.ScanRuleMetadata");
 const Filename = 'customzap';
 const DotSegment = "..%2f";
@@ -18,7 +18,6 @@ const DELIM_LOW = [
     "%2F"  // encoded slash bypass
 ];
 
-
 // Frequently useful but less universal
 const DELIM_MEDIUM = [
     "%2E", "%2e",   // encoded dot normalization issues
@@ -28,7 +27,6 @@ const DELIM_MEDIUM = [
     "%2E%2E",       // dot normalization
     "%3F"           // encoded question mark (path confusion cases)
 ];
-
 
 // Rare but sometimes effective in proxy/CDN edge behavior
 const DELIM_HIGH = [
@@ -41,7 +39,6 @@ const DELIM_HIGH = [
     "%5F", "_",
     "%7C", "|"
 ];
-
 
 // Very rare, parser edge cases, usually noisy
 const DELIM_INSANE = [
@@ -72,14 +69,12 @@ const EXT_MEDIUM = ['jpeg', 'gif', 'svg', 'webp', 'ico', 'woff', 'woff2', 'pdf',
 const EXT_HIGH = ['tif', 'scss', 'sass', 'less', 'styl', 'jsx', 'xml', 'csv', 'html', 'htm'];
 const EXT_INSANE = ['xhtml', 'psd', 'ts', 'tsx', 'coffee', 'ttf', 'otf', 'eot', 'webm', 'mp3', 'wav', 'm4a', 'txt', 'json'];
 
-
 const FLD_LOW = [
     'static', 'assets', 'public', 'media', 'uploads', 'images', 'img', 'css', 'js',
 ];
 const FLD_MEDIUM = [
     'fonts', 'video', 'videos', 'downloads', 'public/css', 'public/js', 'public/images',
     'icons', 'backgrounds', 'banners',
-
 ];
 const FLD_HIGH = [
     'logo', 'javascript', 'scripts', 'styles', 'typefaces', 'audio',
@@ -99,10 +94,13 @@ name: Web Cache Deception Detection
 description: >
   Detect Web Cache Deception in two ways: 1) add delimiters and a file with an extension, 2) combine the attack with path traversal.
 solution: >
- Update the web cache policy to not cache sensitive pages.
+  1. Configure the cache to not cache responses with cookies or session tokens.
+  2. Implement Cache-Control: private for authenticated pages.
+  3. Validate file extensions and paths before allowing caching.
+  4. Use the Vary: Cookie header appropriately.
 references:
   - https://portswigger.net/web-security/web-cache-deception
-  - https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/07-Input_Validation_Testing/11.2-Testing_for_Web_Cache_Deception
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/11.2-Testing_for_Web_Cache_Deception
 category: SERVER
 risk: MEDIUM
 confidence: MEDIUM
@@ -116,22 +114,25 @@ status: alpha
 alertRefOverrides:
   100046-1:
     name: Web Cache Deception - Extension/Delimiter
-    description: Detects Web Cache Deception via delimiters and file extension fuzzing.
+    description: >
+      The server appears to cache sensitive pages when accessed with file extensions or crafted delimiters.
+      This could allow attackers to cache sensitive user pages by appending file extensions or using delimiters,
+      potentially exposing private data to other users.
   100046-2:
     name: Web Cache Deception - Path Traversal
-    description: Detects Web Cache Deception via path traversal technique.
+    description: >
+      The server appears vulnerable to web cache deception via path traversal technique.
+      It may permit caching of sensitive resources due to improper path validation when traversing directories.
 `);
 }
 
 function isStaticPath(path) {
     if (!path) return false;
-    // List of static file extensions for detection
     const staticExts = [
         "css", "js", "gif", "jpg", "jpeg", "png", "svg", "ico", "webp",
         "woff", "woff2", "ttf", "otf", "eot", "mp3", "wav", "m4a", "mp4",
         "webm", "flv", "mov", "avi", "wmv", "pdf", "bmp", "tiff", "psd"
     ];
-    // Get the extension (without query string or fragment)
     let lastPart = path.split("?")[0].split("#")[0];
     let dotSplit = lastPart.split(".");
     if (dotSplit.length < 2) return false;
@@ -139,7 +140,6 @@ function isStaticPath(path) {
     return staticExts.includes(ext);
 }
 
-/** Fill Delimiters, Extensions, Folders based on attack threshold/strength */
 function configureScanInputs(as) {
     Delimiters = [].concat(DELIM_LOW);
     Extensions = [].concat(EXT_LOW);
@@ -157,40 +157,64 @@ function configureScanInputs(as) {
         Folders = Folders.concat(FLD_HIGH);
     }
     if (strength == "INSANE") {
+        Delimiters = Delimiters.concat(DELIM_INSANE);
         Extensions = Extensions.concat(EXT_INSANE);
         Folders = Folders.concat(FLD_INSANE);
     }
 }
 
-// TODO: this section cant detect correctly
+/**
+ * Extracts caching status indicators from common response headers
+ */
+function getCacheStatus(msg) {
+    let headers = msg.getResponseHeader();
+    let xCache = headers.getHeader("X-Cache");
+    let cfCache = headers.getHeader("CF-Cache-Status");
+    let age = headers.getHeader("Age");
+    
+    let combined = "";
+    if (xCache !== null) combined += " X-CACHE:" + xCache;
+    if (cfCache !== null) combined += " CF-CACHE:" + cfCache;
+    if (age !== null) combined += " AGE:" + age;
+
+    return combined.toUpperCase();
+}
+
+/**
+ * Validates whether the crafted request was genuinely stored/served from cache
+ */
 function findEvidence(as, msg) {
     let threshold = as.getAlertThreshold();
-    let xCache = msg.getResponseHeader().getHeader("X-Cache");
+    let cacheStatus1 = getCacheStatus(msg);
 
-    // LOW: Just check response has X-Cache header
+    // LOW: Alert on any indicative caching headers present
     if (threshold == "LOW") {
-        if (xCache !== null) {
-            return true;
-        }
-        return false;
+        return cacheStatus1.length > 0;
     }
 
-    else {
-        let repeatMsg = msg.cloneRequest();
-        as.sendAndReceive(repeatMsg, false, false);
-        let xCache2 = repeatMsg.getResponseHeader().getHeader("X-Cache");
-        // Look for "HIT" in either original or repeated response
-        if (xCache !== null && String(xCache).toUpperCase().indexOf("MISS") !== -1 && xCache2 !== null && String(xCache2).toUpperCase().indexOf("HIT") !== -1) {
-            return true;
-        }
-        return false;
+    // MEDIUM / HIGH: Repeat request to verify state transition (e.g., MISS -> HIT or non-zero Age)
+    let repeatMsg = msg.cloneRequest();
+    as.sendAndReceive(repeatMsg, false, false);
+    
+    let cacheStatus2 = getCacheStatus(repeatMsg);
+    let age2 = repeatMsg.getResponseHeader().getHeader("Age");
+
+    // Standard HIT indicator in repeat response
+    if (cacheStatus2.indexOf("HIT") !== -1) {
+        return true;
     }
+
+    // Age header growing indicates proxy serving from cache
+    if (age2 !== null && parseInt(age2, 10) > 0) {
+        return true;
+    }
+
+    return false;
 }
 
 function scanNode(as, msg) {
     configureScanInputs(as);
     let endWithSlash = false;
-    // Exit early for static files
     let orgPath = msg.getRequestHeader().getURI().getPath();
 
     if (orgPath !== null && isStaticPath(orgPath)) {
@@ -203,31 +227,23 @@ function scanNode(as, msg) {
     if (orgPath == "/") {
         endWithSlash = true;
     }
-    // Try extension/delimiter fuzz first; only proceed to path traversal if none found
+
     let isVulnerable = additionalFile2Cache(as, msg, orgPath, endWithSlash);
-    if (!isVulnerable && as.getAttackStrength() == "HIGH" || as.getAttackStrength() == "INSANE") {
+    if (!isVulnerable && (as.getAttackStrength() == "HIGH" || as.getAttackStrength() == "INSANE")) {
         pathTraversal2Cache(as, msg, orgPath, endWithSlash);
     }
 }
 
 function encodeIfNeeded(delim) {
-
-    // If already percent encoded, keep it
     if (/^%[0-9A-Fa-f]{2}$/.test(delim)) {
         return delim.toUpperCase();
     }
-
-    // Characters safe for WCD path tricks (keep raw)
     const SAFE_RAW = ["/", ".", ";"];
-
     if (SAFE_RAW.indexOf(delim) !== -1) {
         return delim;
     }
-
-    // Everything else → percent encode
     return encodeURIComponent(delim);
 }
-
 
 function additionalFile2Cache(as, msg, orgPath, endWithSlash) {
     for (let i = 0; i < Delimiters.length; i++) {
@@ -252,15 +268,10 @@ function additionalFile2Cache(as, msg, orgPath, endWithSlash) {
             }
 
             uri.setPath(newPath);
-
             as.sendAndReceive(newMsg, false, false);
 
-            // Cache validation: only count actual cache hits
-            let xCache = newMsg.getResponseHeader().getHeader("X-Cache");
             let statusCode = newMsg.getResponseHeader().getStatusCode();
-            let evidence = findEvidence(as, newMsg);
-
-            if (xCache !== null && statusCode >= 200 && statusCode < 300 && evidence) {
+            if (statusCode >= 200 && statusCode < 300 && findEvidence(as, newMsg)) {
                 raiseAlert(as, "100046-1", payload, newMsg, newPath);
                 return true;
             }
@@ -285,12 +296,10 @@ function pathTraversal2Cache(as, msg, orgPath, endWithSlash) {
         let newMsg = msg.cloneRequest();
 
         newMsg.getRequestHeader().getURI().setEscapedPath(newPath);
-
         as.sendAndReceive(newMsg, false, false);
 
-        let xCache = newMsg.getResponseHeader().getHeader("X-Cache");
         let statusCode = newMsg.getResponseHeader().getStatusCode();
-        if (xCache !== null && statusCode >= 200 && statusCode < 300 && findEvidence(as, newMsg)) {
+        if (statusCode >= 200 && statusCode < 300 && findEvidence(as, newMsg)) {
             raiseAlert(as, "100046-2", payload, newMsg, newPath);
             return;
         }
@@ -299,42 +308,12 @@ function pathTraversal2Cache(as, msg, orgPath, endWithSlash) {
 
 function raiseAlert(as, alertRef, payload, newMsg, newPath) {
     let requestUri = newMsg.getRequestHeader().getURI().toString();
-    let name, description;
-    if (alertRef === "100046-1") {
-        name = "Web Cache Deception - Extension/Delimiter";
-        description = "The server appears to cache sensitive pages when accessed with file extensions or crafted delimiters. " +
-            "When requesting '" + newPath + "', this could allow attackers to cache sensitive user pages " +
-            "by appending file extensions or using delimiters, potentially exposing private data to other users.";
-    } else if (alertRef === "100046-2") {
-        name = "Web Cache Deception - Path Traversal";
-        description = "The server appears vulnerable to web cache deception via path traversal technique. " +
-            "When accessing '" + newPath + "', it may permit caching of sensitive resources due to improper path validation.";
-    } else {
-        name = "Web Cache Deception Vulnerability Detected";
-        description = "The server may be vulnerable to web cache deception attacks.";
-    }
 
     as.newAlert(alertRef)
-        .setRisk(2)       // Medium
-        .setConfidence(2) // Medium
-        .setName(name)
-        .setDescription(description)
         .setUri(requestUri)
         .setParam("Path")
         .setAttack(newPath)
         .setEvidence(payload)
-        .setSolution(
-            "1. Configure the cache to not cache responses with cookies or session tokens.\n" +
-            "2. Implement cache-control: private for authenticated pages.\n" +
-            "3. Validate file extensions and paths before allowing caching.\n" +
-            "4. Use the Vary: Cookie header appropriately."
-        )
-        .setReference(
-            "https://portswigger.net/web-security/web-cache-deception\n" +
-            "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/07-Input_Validation_Testing/11.2-Testing_for_Web_Cache_Deception"
-        )
-        .setCweId(524)  // Information Exposure Through Caching
-        .setWascId(13)  // Information Leakage
         .setMessage(newMsg)
         .raise();
 }
